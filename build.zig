@@ -13,7 +13,6 @@ pub fn build(b: *std.Build) void {
     const link_system_binutils = b.systemIntegrationOption("binutils", .{});
     const link_system_elfutils = b.systemIntegrationOption("elfutils", .{});
     const link_system_curl = b.systemIntegrationOption("curl", .{});
-    const use_system_dwarfutils = b.systemIntegrationOption("dwarfutils", .{});
 
     const kcov_sowrapper = b.addLibrary(.{
         .linkage = .dynamic,
@@ -212,7 +211,9 @@ pub fn build(b: *std.Build) void {
     kcov.addCSourceFile(.{ .file = upstream.path("src/writers/coveralls-writer.cc") });
     // kcov.addCSourceFile(.{ .file = upstream.path("src/writers/dummy-coveralls-writer.cc") });
 
-    if (target.result.cpu.arch.isX86()) {
+    // The libbfd disassembler is for the ELF/ptrace engine and pulls in <elf.h>, which
+    // does not exist on macOS; Darwin uses the mach engine, so fall back to the dummy.
+    if (target.result.cpu.arch.isX86() and !target.result.os.tag.isDarwin()) {
         if (link_system_binutils) {
             kcov.linkSystemLibrary("bfd", .{});
             kcov.linkSystemLibrary("opcodes", .{});
@@ -289,6 +290,25 @@ pub fn build(b: *std.Build) void {
     const test_options = b.addOptions();
     test_options.addOptionPath("fixture_path", fixture.getEmittedBin());
 
+    // The Mach-O path is exercised only on a macOS host, where dsymutil produces the
+    // .dSYM whose DWARF the bridge reads.
+    if (@import("builtin").os.tag == .macos) {
+        const macho_fixture = b.addExecutable(.{
+            .name = "dwarf_zig_fixture_macho",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/test/fixture.zig"),
+                .target = b.resolveTargetQuery(.{}),
+                .optimize = .Debug,
+            }),
+        });
+        const dsymutil = b.addSystemCommand(&.{ "dsymutil", "--flat" });
+        dsymutil.addFileArg(macho_fixture.getEmittedBin());
+        dsymutil.addArg("-o");
+        test_options.addOptionPath("macho_fixture_path", dsymutil.addOutputFileArg("fixture.dwarf"));
+    } else {
+        test_options.addOption([]const u8, "macho_fixture_path", "");
+    }
+
     const dwarf_zig_test = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/dwarf.zig"),
@@ -343,11 +363,16 @@ pub fn build(b: *std.Build) void {
             kcov.addCSourceFiles(.{
                 .root = upstream.path("."),
                 .files = &.{
-                    "src/parsers/macho-parser.cc",
                     "src/engines/mach-engine.cc",
                     "src/engines/osx/mach_excServer.c",
                 },
             });
+
+            // DWARF line tables (from the .dSYM) via dwarf-zig instead of libdwarf.
+            kcov.addIncludePath(upstream.path("src/parsers"));
+            kcov.addIncludePath(b.path("src"));
+            kcov.addCSourceFile(.{ .file = b.path("src/parsers/macho-parser-zig.cc") });
+            kcov.linkLibrary(dwarf_zig);
         },
         else => |os_tag| std.debug.panic("unsupported os '{s}'", .{@tagName(os_tag)}),
     }
@@ -496,16 +521,6 @@ pub fn build(b: *std.Build) void {
             if (kcov_system_daemon) |system_daemon| system_daemon.root_module.linkLibrary(elfutils_dependency.artifact("dw"));
             line2addr.root_module.linkLibrary(elfutils_dependency.artifact("elf"));
             line2addr.root_module.linkLibrary(elfutils_dependency.artifact("dw"));
-        }
-    } else if (target.result.os.tag.isDarwin()) {
-        if (use_system_dwarfutils) {
-            kcov.addSystemIncludePath(.{ .cwd_relative = "/usr/local/opt/dwarfutils/include/libdwarf-0/" });
-            kcov.addSystemIncludePath(.{ .cwd_relative = "/opt/homebrew/opt/dwarfutils/include/libdwarf-0/" });
-            kcov.addLibraryPath(.{ .cwd_relative = "/usr/local/opt/dwarfutils/lib/" });
-            kcov.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/opt/dwarfutils/lib/" });
-            kcov.linkSystemLibrary("dwarf", .{});
-        } else {
-            // TODO https://www.prevanders.net/dwarf.html
         }
     }
 }
