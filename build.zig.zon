@@ -34,6 +34,7 @@
         "LICENSE",
         "README.md",
         "bin_to_c_source.zig",
+        "src",
     },
     .fingerprint = 0xdcf17906e9974cc5, // Changing this has security and trust implications.
 }

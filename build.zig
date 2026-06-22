@@ -264,6 +264,43 @@ pub fn build(b: *std.Build) void {
         },
     });
 
+    // dwarf-zig: reads DWARF line tables via Zig's std.debug.Dwarf, replacing libdw.
+    const dwarf_zig = b.addLibrary(.{
+        .name = "dwarf_zig",
+        .linkage = .static,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/dwarf.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+
+    // Bridge test: build a fixture for x86_64-linux (self-hosted DWARF, which libdw
+    // rejects) and check dwarf-zig reads its line table.
+    const fixture = b.addExecutable(.{
+        .name = "dwarf_zig_fixture",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/test/fixture.zig"),
+            .target = b.resolveTargetQuery(.{ .cpu_arch = .x86_64, .os_tag = .linux }),
+            .optimize = .Debug,
+        }),
+    });
+    const test_options = b.addOptions();
+    test_options.addOptionPath("fixture_path", fixture.getEmittedBin());
+
+    const dwarf_zig_test = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/dwarf.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    dwarf_zig_test.root_module.addOptions("build_options", test_options);
+    const test_step = b.step("test", "Run dwarf-zig tests");
+    test_step.dependOn(&b.addRunArtifact(dwarf_zig_test).step);
+
     switch (target.result.os.tag) {
         .linux, .freebsd => |os_tag| {
             // ELF_SRCS
@@ -277,7 +314,6 @@ pub fn build(b: *std.Build) void {
                         "src/engines/ptrace_freebsd.cc",
                     "src/parsers/elf.cc",
                     "src/parsers/elf-parser.cc",
-                    "src/parsers/dwarf.cc",
                     "src/solib-handler.cc",
                     "src/solib-parser/phdr_data.c",
                 },
@@ -288,6 +324,12 @@ pub fn build(b: *std.Build) void {
 
             // SOLIB_generated
             kcov.addCSourceFile(.{ .file = library_cc });
+
+            // DWARF line tables via dwarf-zig instead of libdw.
+            kcov.addIncludePath(upstream.path("src/parsers"));
+            kcov.addIncludePath(b.path("src"));
+            kcov.addCSourceFile(.{ .file = b.path("src/parsers/dwarf-zig.cc") });
+            kcov.linkLibrary(dwarf_zig);
         },
         .ios,
         .macos,
@@ -438,7 +480,6 @@ pub fn build(b: *std.Build) void {
     if (target.result.os.tag == .linux) {
         if (link_system_elfutils) {
             kcov.linkSystemLibrary("elf", .{});
-            kcov.linkSystemLibrary("dw", .{});
             if (kcov_system_daemon) |system_daemon| system_daemon.root_module.linkSystemLibrary("elf", .{});
             if (kcov_system_daemon) |system_daemon| system_daemon.root_module.linkSystemLibrary("dw", .{});
             line2addr.root_module.linkSystemLibrary("elf", .{});
@@ -448,7 +489,9 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         })) |elfutils_dependency| {
             kcov.linkLibrary(elfutils_dependency.artifact("elf"));
-            kcov.linkLibrary(elfutils_dependency.artifact("dw"));
+            // elf-parser.cc includes libdw headers but uses no libdw symbols; the
+            // line tables come from dwarf-zig, so provide the headers without libdw.
+            kcov.addIncludePath(elfutils_dependency.artifact("dw").getEmittedIncludeTree());
             if (kcov_system_daemon) |system_daemon| system_daemon.root_module.linkLibrary(elfutils_dependency.artifact("elf"));
             if (kcov_system_daemon) |system_daemon| system_daemon.root_module.linkLibrary(elfutils_dependency.artifact("dw"));
             line2addr.root_module.linkLibrary(elfutils_dependency.artifact("elf"));
