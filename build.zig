@@ -4,7 +4,23 @@ const version = std.SemanticVersion.parse(@import("build.zig.zon").version) catc
 
 pub fn build(b: *std.Build) void {
     const upstream = b.dependency("kcov", .{});
-    const target = b.standardTargetOptions(.{});
+
+    // macOS/x86_64: a long-standing Darwin kernel bug corrupts the AVX-512 opmask registers
+    // (k0-k7) on signal return, and kcov is a ptrace/mach debugger full of signal handlers --
+    // so any AVX-512 code (std's vectorized search in the dwarf-zig reader, clang's
+    // auto-vectorized C++) faults mid-run on a native build. Build the whole coverage tool
+    // without AVX-512 there; Go disables AVX-512 on darwin for the same reason. Linux/Windows
+    // keep the native CPU (AVX-512 is safe there), and a coverage tool needs no SIMD throughput.
+    const requested_target = b.standardTargetOptions(.{});
+    const target = blk: {
+        if (!(requested_target.result.os.tag.isDarwin() and requested_target.result.cpu.arch == .x86_64))
+            break :blk requested_target;
+        // Override only the CPU model (drop to baseline -> no AVX-512); keep the rest of the
+        // native query so the macOS SDK/frameworks still resolve.
+        var query = requested_target.query;
+        query.cpu_model = .baseline;
+        break :blk b.resolveTargetQuery(query);
+    };
     const optimize = b.standardOptimizeOption(.{});
 
     // const system_daemon = b.option(bool, "system-daemon", "Enable support for full system instrumentation (untested)") orelse false;

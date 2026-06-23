@@ -11,6 +11,43 @@ const Dwarf = std.debug.Dwarf;
 const LNS = std.dwarf.LNS;
 const LNE = std.dwarf.LNE;
 
+fn dz_dbg(comptime fmt: []const u8, args: anytype) void {
+    var buf: [256]u8 = undefined;
+    const s = std.fmt.bufPrint(&buf, "[dzdbg] " ++ fmt ++ "\n", args) catch return;
+    _ = std.c.write(2, s.ptr, s.len);
+}
+
+// Native fault diagnostics: report the signal + faulting address on a crash.
+extern "c" fn _exit(code: c_int) noreturn;
+const SigactionC = extern struct {
+    handler: ?*const fn (c_int, ?*const anyopaque, ?*anyopaque) callconv(.c) void,
+    mask: u32,
+    flags: c_int,
+};
+extern "c" fn sigaction(sig: c_int, act: ?*const SigactionC, oact: ?*SigactionC) c_int;
+fn faultHandler(sig: c_int, info: ?*const anyopaque, ctx: ?*anyopaque) callconv(.c) void {
+    var si_addr: usize = 0;
+    // Darwin siginfo_t: si_addr lives at byte offset 24.
+    if (info) |p| si_addr = @as(*align(1) const usize, @ptrFromInt(@intFromPtr(p) + 24)).*;
+    // Darwin x86_64 ucontext: uc_mcontext ptr @48; mcontext __ss.__rip @144.
+    var rip: usize = 0;
+    if (ctx) |u| {
+        const mctx = @as(*align(1) const usize, @ptrFromInt(@intFromPtr(u) + 48)).*;
+        if (mctx != 0) rip = @as(*align(1) const usize, @ptrFromInt(mctx + 144)).*;
+    }
+    dz_dbg("*** FAULT sig={d} si_addr=0x{x} rip=0x{x} ***", .{ sig, si_addr, rip });
+    dz_dbg("*** dwarf-zig fns: forEachLine=0x{x} emitRows=0x{x} collectStmtAddrs=0x{x} dz_dbg=0x{x} ***", .{
+        @intFromPtr(&forEachLine), @intFromPtr(&emitRows), @intFromPtr(&collectStmtAddrs), @intFromPtr(&dz_dbg),
+    });
+    _exit(139);
+}
+fn installFaultHandler() void {
+    const act = SigactionC{ .handler = &faultHandler, .mask = 0, .flags = 0x40 }; // SA_SIGINFO
+    _ = sigaction(11, &act, null); // SIGSEGV
+    _ = sigaction(10, &act, null); // SIGBUS
+    _ = sigaction(4, &act, null); // SIGILL
+}
+
 /// Invoked once per line-table row. `file` points at `file_len` bytes that are only
 /// valid for the duration of the call; the callee must copy what it needs.
 pub const LineCallback = *const fn (
@@ -39,6 +76,9 @@ export fn dwarf_zig_for_each_line(
 }
 
 fn forEachLine(path: []const u8, cb: LineCallback, ctx: ?*anyopaque) !void {
+    installFaultHandler();
+    dz_dbg("forEachLine: begin", .{});
+    defer dz_dbg("forEachLine: returned (dwarf-zig done)", .{});
     const gpa = std.heap.c_allocator;
 
     var threaded: std.Io.Threaded = .init(gpa, .{});
@@ -94,6 +134,7 @@ fn forEachLineMacho(gpa: std.mem.Allocator, io: std.Io, file: std.Io.File, cb: L
     var dwarf: Dwarf = .{ .sections = sections };
     defer dwarf.deinit(gpa);
     try dwarf.open(gpa, .little);
+    dz_dbg("macho: dwarf.open ok -> emitRows", .{});
     try emitRows(gpa, &dwarf, .little, cb, ctx);
 }
 
@@ -101,14 +142,16 @@ fn forEachLineMacho(gpa: std.mem.Allocator, io: std.Io, file: std.Io.File, cb: L
 // drops the is_stmt flag, so collect the statement addresses from the line program
 // and filter line_table by them; otherwise non-statement rows (closing braces,
 // epilogues, at function-end addresses) would count as uncovered lines.
-fn emitRows(
+noinline fn emitRows(
     gpa: std.mem.Allocator,
     dwarf: *Dwarf,
     endian: std.builtin.Endian,
     cb: LineCallback,
     ctx: ?*anyopaque,
 ) !void {
+    dz_dbg("emitRows: ENTRY CUs={d} -> collectStmtAddrs", .{dwarf.compile_unit_list.items.len});
     var stmt_addrs = try collectStmtAddrs(gpa, dwarf, endian);
+    dz_dbg("emitRows: collectStmtAddrs returned count={d}", .{stmt_addrs.count()});
     defer stmt_addrs.deinit(gpa);
 
     var path_buf: [std.fs.max_path_bytes * 2]u8 = undefined;
@@ -143,14 +186,16 @@ fn emitRows(
 
 // Replay the line-number program (the VM that std.debug.Dwarf runs internally but
 // whose is_stmt flag it does not expose) and collect the addresses of statement rows.
-fn collectStmtAddrs(
+noinline fn collectStmtAddrs(
     gpa: std.mem.Allocator,
     dwarf: *Dwarf,
     endian: std.builtin.Endian,
 ) !std.AutoHashMapUnmanaged(u64, void) {
+    dz_dbg("collectStmtAddrs: ENTRY", .{});
     var set: std.AutoHashMapUnmanaged(u64, void) = .empty;
     errdefer set.deinit(gpa);
     const data = dwarf.section(.debug_line) orelse return set;
+    dz_dbg("collectStmtAddrs: debug_line len={d}", .{data.len});
 
     var reader: std.Io.Reader = .fixed(data);
     while (reader.seek < data.len) {
