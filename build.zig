@@ -23,6 +23,13 @@ pub fn build(b: *std.Build) void {
     };
     const optimize = b.standardOptimizeOption(.{});
 
+    // Third-party C libraries (curl, zlib, transitively mbedtls) are never UB
+    // sanitized: kcov is built as Debug only on x86_64-macOS to dodge a Zig
+    // linker bug, and a Debug C lib emits __ubsan_handle_* refs that go
+    // unresolved against kcov's -fno-sanitize-c. Build them release regardless.
+    const cdep_optimize: std.builtin.OptimizeMode =
+        if (optimize == .Debug) .ReleaseFast else optimize;
+
     // const system_daemon = b.option(bool, "system-daemon", "Enable support for full system instrumentation (untested)") orelse false;
 
     const link_system_zlib = b.systemIntegrationOption("zlib", .{});
@@ -487,7 +494,7 @@ pub fn build(b: *std.Build) void {
         line2addr.root_module.linkSystemLibrary("curl", .{});
     } else if (b.lazyDependency("curl", .{
         .target = target,
-        .optimize = optimize,
+        .optimize = cdep_optimize,
 
         // allyourcodebase/openssl only works on x86_64-linux
         .@"use-mbedtls" = true,
@@ -516,7 +523,7 @@ pub fn build(b: *std.Build) void {
         line2addr.root_module.linkSystemLibrary("z", .{});
     } else if (b.lazyDependency("zlib", .{
         .target = target,
-        .optimize = optimize,
+        .optimize = cdep_optimize,
     })) |zlib_dependency| {
         kcov.linkLibrary(zlib_dependency.artifact("z"));
         kcov_system_lib.root_module.linkLibrary(zlib_dependency.artifact("z"));
