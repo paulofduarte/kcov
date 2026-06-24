@@ -15,10 +15,18 @@ pub fn build(b: *std.Build) void {
     const target = blk: {
         if (!(requested_target.result.os.tag.isDarwin() and requested_target.result.cpu.arch == .x86_64))
             break :blk requested_target;
-        // Override only the CPU model (drop to baseline -> no AVX-512); keep the rest of the
-        // native query so the macOS SDK/frameworks still resolve.
+        // Drop to baseline x86_64 -> no AVX-512, keeping the rest of the native query
+        // so the macOS SDK/frameworks still resolve. Setting only cpu_model is not
+        // enough: when kcov is built as a dependency the parent serializes its *native*
+        // target, so the query arrives with the host CPU's features (incl. AVX-512) in
+        // cpu_features_add, which survive a cpu_model change. Clear the feature sets too,
+        // otherwise AVX-512 codegen leaks back in -- and its larger encodings perturb the
+        // Mach-O layout enough to trigger a Zig 0.16 linker bug that overwrites the first
+        // 16 bytes of the first __text function's prologue (collectStmtAddrs).
         var query = requested_target.query;
         query.cpu_model = .baseline;
+        query.cpu_features_add = .empty;
+        query.cpu_features_sub = .empty;
         break :blk b.resolveTargetQuery(query);
     };
     const optimize = b.standardOptimizeOption(.{});
