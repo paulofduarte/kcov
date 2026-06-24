@@ -232,6 +232,14 @@ pub fn build(b: *std.Build) void {
         .name = "kcov",
         .root_module = kcov,
     });
+    // Zig 0.16's self-hosted Mach-O linker emits the load commands with no header
+    // padding (sizeofcmds ends exactly at the __text file offset). When the binary
+    // is later codesigned -- as the coverage flow does, to grant kcov the
+    // cs.debugger entitlement -- codesign appends a 16-byte LC_CODE_SIGNATURE load
+    // command, which then overwrites the first 16 bytes of __text (the first
+    // function's prologue) and makes kcov crash on entry. Reserve header padding so
+    // the signature command has room. (ld64 leaves headerpad by default.)
+    if (target.result.os.tag.isDarwin()) kcov_exe.headerpad_size = 0x1000;
     b.installArtifact(kcov_exe);
     kcov.addIncludePath(upstream.path("src/include"));
     kcov.addCMacro("KCOV_LIBRARY_PREFIX", "/tmp");
