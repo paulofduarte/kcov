@@ -205,6 +205,12 @@ pub fn build(b: *std.Build) void {
         .pic = true,
         .link_libc = true,
         .link_libcpp = true,
+        // kcov is a third-party C/C++ tool that ships and runs in release (no UB
+        // sanitizer). We build it as Debug only on x86_64-macOS to dodge a Zig
+        // self-hosted Mach-O linker bug; Debug otherwise turns kcov's benign C UB
+        // (e.g. unaligned reads of Mach-message fields) into hard aborts. Disable
+        // the C UB sanitizer so the Debug build behaves like its tested release.
+        .sanitize_c = .off,
     });
 
     const kcov_exe = b.addExecutable(.{
